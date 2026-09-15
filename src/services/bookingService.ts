@@ -5,20 +5,10 @@ import type {
   StatusFilter,
   SystemStatus,
 } from "../types/booking";
+import { getReviewStatuses } from "./reviewStateService";
 
 const CHECK_STATUS_STORAGE_KEY = "booking-approval-my-check-status-v1";
-
-function startOfToday(): Date {
-  const date = new Date();
-  date.setHours(0, 0, 0, 0);
-  return date;
-}
-
-function endOfToday(): Date {
-  const date = new Date();
-  date.setHours(23, 59, 59, 999);
-  return date;
-}
+let bookingsPromise: Promise<BookingCase[]> | null = null;
 
 function normalizePhone(value: string): string {
   return String(value ?? "").replace(/\s+/g, "").trim();
@@ -53,19 +43,32 @@ function parseBoolean(value: string): boolean {
 
 function parseDate(value: string): string {
   const trimmed = value.trim();
-  if (!trimmed) return new Date(0).toISOString();
+  if (!trimmed) return "";
 
-  const parsed = new Date(trimmed);
-  if (!Number.isNaN(parsed.getTime())) {
-    return parsed.toISOString();
+  const match = trimmed.match(
+    /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/,
+  );
+  if (match) {
+    const [, month, day, year, hour = "0", minute = "0", second = "0"] = match;
+    const parsed = new Date(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+    );
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toISOString();
+    }
   }
 
-  const fallback = new Date(trimmed.replace(/\//g, "/"));
+  const fallback = new Date(trimmed);
   if (!Number.isNaN(fallback.getTime())) {
     return fallback.toISOString();
   }
 
-  return new Date(0).toISOString();
+  return "";
 }
 
 function normalizeSystemStatus(raw: string): SystemStatus {
@@ -188,6 +191,13 @@ export function setMyCheckStatus(
 }
 
 export async function getBookings(): Promise<BookingCase[]> {
+  if (bookingsPromise) return bookingsPromise;
+
+  bookingsPromise = loadBookings();
+  return bookingsPromise;
+}
+
+async function loadBookings(): Promise<BookingCase[]> {
   const response = await fetch("/bookings.csv", { cache: "no-store" });
   if (!response.ok) {
     throw new Error(`Failed to load bookings CSV (${response.status})`);
@@ -201,15 +211,15 @@ export async function getBookings(): Promise<BookingCase[]> {
 
   const headers = rows[0].map((header) => header.trim().replace(/\uFEFF/g, ""));
   const bookingRows = rows.slice(1);
-  const checkStatuses = loadCheckStatuses();
+  const checkStatuses = getReviewStatuses();
 
-  const mappedBookings: BookingCase[] = bookingRows
+  const mappedBookings = bookingRows
     .map((row) => {
       const requestId = row[0]?.trim() ?? "";
       const customerPhone = normalizePhone(getCellValue(headers, row, "Customer Phone"));
       const houseName = getCellValue(headers, row, "House Name");
 
-      if (!customerPhone && !houseName) {
+      if (!customerPhone) {
         return null;
       }
 
@@ -227,7 +237,9 @@ export async function getBookings(): Promise<BookingCase[]> {
         id: customerPhone,
         requestId: requestId || undefined,
         timestamp: parseDate(getCellValue(headers, row, "Timestamp")),
+        name: getCellValue(headers, row, "Name (GA/CM)"),
         houseName,
+        houseCategory: getCellValue(headers, row, "House Category"),
         mm: getCellValue(headers, row, "MM"),
         roomNumber: getCellValue(headers, row, "Room Number"),
         bookingCategory: getCellValue(headers, row, "Booking Category"),
@@ -250,19 +262,88 @@ export async function getBookings(): Promise<BookingCase[]> {
         remarks: getCellValue(headers, row, "Remarks"),
         bedsRequested,
         systemStatus: normalizeSystemStatus(rawStatus),
+        circle: getCellValue(headers, row, "Circle"),
+        statusForKundan: getCellValue(headers, row, "Status for Kundan"),
         myCheckStatus: checkStatuses[customerPhone] ?? "NOT_CHECKED",
       } satisfies BookingCase;
     })
-    .filter((booking): booking is BookingCase => booking !== null);
+    .filter((booking) => booking !== null);
+
+  const today = formatLocalDate(new Date());
+  const matchingToday = mappedBookings.filter((booking) =>
+    isToday(booking.timestamp),
+  ).length;
+  console.info("[bookingService] CSV load", {
+    csvRows: bookingRows.length,
+    validBookings: mappedBookings.length,
+    firstParsedTimestamps: mappedBookings.slice(0, 3).map((booking) => booking.timestamp),
+    todayLocalDate: today,
+    matchingToday,
+  });
 
   return mappedBookings;
 }
 
 export async function getBookingById(
   id: string,
+  requestId?: string,
 ): Promise<BookingCase | undefined> {
   const bookings = await getBookings();
-  return bookings.find((booking) => booking.id === normalizePhone(id));
+  const matching = bookings.filter((booking) => booking.id === normalizePhone(id));
+  return requestId
+    ? matching.find((booking) => booking.requestId === requestId) ?? matching[0]
+    : matching[0];
+}
+
+export function refreshBookings(): void {
+  bookingsPromise = null;
+}
+
+export function formatDateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
+    date.getDate(),
+  ).padStart(2, "0")}`;
+}
+
+export function getBookingDateKey(timestamp: string): string {
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? "" : formatDateKey(date);
+}
+
+export function getAvailableDates(bookings: BookingCase[]): string[] {
+  return [...new Set(bookings.map((booking) => getBookingDateKey(booking.timestamp)).filter(Boolean))].sort().reverse();
+}
+
+export function filterBookings(
+  bookings: BookingCase[],
+  options: {
+    date?: string | "ALL";
+    query?: string;
+    status?: string;
+    house?: string;
+    mm?: string;
+    bookingType?: string;
+    occupancyType?: string;
+    bookingCategory?: string;
+    includeChecked?: boolean;
+  } = {},
+): BookingCase[] {
+  const query = options.query?.trim().toLowerCase() ?? "";
+  return bookings.filter((booking) => {
+    if (options.date && options.date !== "ALL" && getBookingDateKey(booking.timestamp) !== options.date) return false;
+    if (!options.includeChecked && booking.myCheckStatus !== "NOT_CHECKED") return false;
+    if (options.status && options.status !== "All" && (options.status === "Other" ? ["Needs Review", "Approved", "Duplicate", "Rejected", "On Hold"].includes(booking.systemStatus) : booking.systemStatus !== options.status)) return false;
+    if (options.house && booking.houseName !== options.house) return false;
+    if (options.mm && booking.mm !== options.mm) return false;
+    if (options.bookingType && booking.bookingType !== options.bookingType) return false;
+    if (options.occupancyType && booking.occupancyType !== options.occupancyType) return false;
+    if (options.bookingCategory && booking.bookingCategory !== options.bookingCategory) return false;
+    if (!query) return true;
+    return [booking.houseName, booking.mm, booking.roomNumber, booking.customerId, booking.customerPhone, booking.requestId]
+      .join(" ")
+      .toLowerCase()
+      .includes(query);
+  });
 }
 
 export function getTodayUncheckedCases(
@@ -336,8 +417,21 @@ export function filterUncheckedCases(
 }
 
 export function isToday(isoTimestamp: string): boolean {
-  const value = new Date(isoTimestamp).getTime();
-  return value >= startOfToday().getTime() && value <= endOfToday().getTime();
+  const date = new Date(isoTimestamp);
+  if (Number.isNaN(date.getTime())) return false;
+
+  const today = new Date();
+  return (
+    date.getFullYear() === today.getFullYear() &&
+    date.getMonth() === today.getMonth() &&
+    date.getDate() === today.getDate()
+  );
+}
+
+function formatLocalDate(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
+    date.getDate(),
+  ).padStart(2, "0")}`;
 }
 
 const STATUS_ORDER = [

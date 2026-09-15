@@ -17,3 +17,13 @@ export function formatTime(isoTimestamp: string): string {
     minute: "2-digit",
   }).format(new Date(isoTimestamp));
 }
+
+export function formatDateTime(isoTimestamp: string): string {
+  return new Intl.DateTimeFormat("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(isoTimestamp));
+}

@@ -6,12 +6,21 @@ export type SystemStatus =
   | "On Hold";
 
 export type MyCheckStatus = "NOT_CHECKED" | "CHECKED";
+export type ReviewAction = "Approved" | "Rejected" | "Duplicate";
+
+export interface ReviewRecord {
+  customerPhone: string;
+  action: ReviewAction;
+  reviewedAt: string;
+}
 
 export interface BookingCase {
   id: string;
   requestId?: string;
   timestamp: string;
+  name?: string;
   houseName: string;
+  houseCategory?: string;
   mm: string;
   roomNumber: string;
   bookingCategory: string;
@@ -34,6 +43,8 @@ export interface BookingCase {
   remarks: string;
   bedsRequested: number;
   systemStatus: SystemStatus;
+  circle?: string;
+  statusForKundan?: string;
   myCheckStatus: MyCheckStatus;
 }
 
@@ -42,7 +53,10 @@ export type StatusFilter =
   | "Needs Review"
   | "Approved"
   | "Duplicate"
-  | "Rejected";
+  | "Rejected"
+  | "Other";
+
+export type DateSelection = string | "ALL";
 
 export interface DashboardSummary {
   dateLabel: string;

@@ -6,6 +6,7 @@ const FILTERS: StatusFilter[] = [
   "Approved",
   "Duplicate",
   "Rejected",
+  "Other" as StatusFilter,
 ];
 
 export function FilterChips({
